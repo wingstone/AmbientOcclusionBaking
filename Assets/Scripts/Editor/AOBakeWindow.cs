@@ -3,6 +3,7 @@ using UnityEngine.SceneManagement;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using System.Collections;
+using System.IO;
 using System.Collections.Generic;
 
 
@@ -32,13 +33,13 @@ public struct Triangle
 
 public class AOBakeWindow : EditorWindow
 {
-    bool groupEnabled;
+    int resolution = 1024;
     int rayCount = 512;
     float range = 1.5f;
     bool useBlur = false;
-    float blurRadius = 1f;
-    bool averageNormals = false;
+
     Texture2D[] aoTex = null;
+    int aoIndex = -1;
 
 
     // Add menu named "My Window" to the Window menu
@@ -54,46 +55,55 @@ public class AOBakeWindow : EditorWindow
     {
         GUILayout.Label("Base Settings", EditorStyles.boldLabel);
 
-        groupEnabled = EditorGUILayout.BeginToggleGroup("Optional Settings", groupEnabled);
+        resolution = EditorGUILayout.IntSlider("AO Resolution", resolution, 128, 1024);
         rayCount = EditorGUILayout.IntSlider("Ray Count", rayCount, 0, 1024);
         range = EditorGUILayout.Slider("Range", range, 0, 3);
         useBlur = EditorGUILayout.Toggle("Use Blur", useBlur);
-        averageNormals = EditorGUILayout.Toggle("Average Normals", averageNormals);
-        blurRadius = EditorGUILayout.Slider("Range", blurRadius, 0, 3);
 
         if (GUILayout.Button("Bake Start"))
         {
             StartBake();
         }
 
-        EditorGUILayout.EndToggleGroup();
     }
 
-    void CreateAOTex(int width)
+    void CreateAOTex()
     {
-
         LightmapData[] lightmaps = LightmapSettings.lightmaps;
         int len = lightmaps.Length;
         aoTex = new Texture2D[len];
+        Color[] colors = new Color[resolution * resolution];
+        for (int i = 0; i < colors.Length; i++)
+        {
+            colors[i] = Color.white;
+        }
         for (int i = 0; i < len; i++)
         {
-            aoTex[i] = new Texture2D(width, width, TextureFormat.RGB24, false);
+            aoTex[i] = new Texture2D(resolution, resolution, TextureFormat.RGB24, false);
+            aoTex[i].SetPixels(colors);
         }
     }
 
-    void SaveAOTex(Texture2D[] aoTex)
+    void SaveAOTex()
     {
         string path = SceneManager.GetActiveScene().path;
+        path = Path.GetDirectoryName(path);
+        string name = SceneManager.GetActiveScene().name;
+        path = Path.Combine(path, name);
 
-        // todo save ao tex
-        Debug.Log(path);
+        for (int i = 0; i < aoTex.Length; i++)
+        {
+            byte[] data = aoTex[i].EncodeToTGA();
+            File.WriteAllBytes(path + "/AmbientOcclusion_" + i + ".tga", data);
+        }
+        AssetDatabase.Refresh();
     }
 
-    void drawLine(float x1, float y1, float x2, float y2, Point p1, Point p2, Point p3)
+    void drawLine(int x1, int x2, int y, Point p1, Point p2, Point p3)
     {
-        for (float x = x1; x1 < x2; x1++)
+        for (int x = x1; x1 <= x2; x1++)
         {
-            Vector2 f = new Vector2(x, y1);
+            Vector2 f = new Vector2(x, y);
             // calculate vectors from point f to vertices p1, p2 and p3:
             var f1 = p1.uv - f;
             var f2 = p2.uv - f;
@@ -104,9 +114,14 @@ public class AOBakeWindow : EditorWindow
             var a1 = Vector3.Cross(f2, f3).magnitude / a; // p1's triangle area / a
             var a2 = Vector3.Cross(f3, f1).magnitude / a; // p2's triangle area / a 
             var a3 = Vector3.Cross(f1, f2).magnitude / a; // p3's triangle area / a
-                                                          
+
             var pos = p1.p * a1 + p2.p * a2 + p3.p * a3;
             var nor = p1.n * a1 + p2.n * a2 + p3.n * a3;
+
+            if (aoIndex >= 0 && aoIndex < aoTex.Length)
+            {
+                aoTex[aoIndex].SetPixel(x, y, Color.black);
+            }
         }
 
     }
@@ -123,7 +138,7 @@ public class AOBakeWindow : EditorWindow
 
         for (float scanlineY = v1.uv.y; scanlineY <= v2.uv.y; scanlineY++)
         {
-            drawLine(curx1, scanlineY, curx2, scanlineY, v1, v2, v3);
+            drawLine((int)curx1, (int)curx2, (int)scanlineY, v1, v2, v3);
             curx1 += invslope1;
             curx2 += invslope2;
         }
@@ -136,14 +151,14 @@ public class AOBakeWindow : EditorWindow
         float invslope1 = (v3.uv.x - v1.uv.x) / (v3.uv.y - v1.uv.y);
         float invslope2 = (v3.uv.x - v2.uv.x) / (v3.uv.y - v2.uv.y);
 
-        float curx1 = v3.uv.x;
-        float curx2 = v3.uv.x;
+        float curx1 = v1.uv.x;
+        float curx2 = v2.uv.x;
 
-        for (float scanlineY = v3.uv.x; scanlineY > v1.uv.x; scanlineY--)
+        for (float scanlineY = v1.uv.y; scanlineY <= v3.uv.y; scanlineY++)
         {
-            drawLine(curx1, scanlineY, curx2, scanlineY, v1, v2, v3);
-            curx1 -= invslope1;
-            curx2 -= invslope2;
+            drawLine((int)curx1, (int)curx2, (int)scanlineY, v1, v2, v3);
+            curx1 += invslope1;
+            curx2 += invslope2;
         }
     }
 
@@ -168,9 +183,83 @@ public class AOBakeWindow : EditorWindow
         }
     }
 
+    float sign(Vector2 p1, Vector2 p2, Vector2 p3)
+    {
+        return (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y);
+    }
+
+    bool PointInTriangle(Vector2 pt, Vector2 v1, Vector2 v2, Vector2 v3)
+    {
+        float d1, d2, d3;
+        bool has_neg, has_pos;
+
+        d1 = sign(pt, v1, v2);
+        d2 = sign(pt, v2, v3);
+        d3 = sign(pt, v3, v1);
+
+        has_neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+        has_pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+
+        return !(has_neg && has_pos);
+    }
+
+    void drawTriangleSimple(Point p1, Point p2, Point p3)
+    {
+        /* get the bounding box of the triangle */
+        float maxX = Mathf.Max(p1.uv.x, Mathf.Max(p2.uv.x, p3.uv.x));
+        maxX = Mathf.Ceil(maxX);
+        float minX = Mathf.Min(p1.uv.x, Mathf.Min(p2.uv.x, p3.uv.x));
+        minX = Mathf.Floor(minX);
+        float maxY = Mathf.Max(p1.uv.y, Mathf.Max(p2.uv.y, p3.uv.y));
+        maxY = Mathf.Ceil(maxY);
+        float minY = Mathf.Min(p1.uv.y, Mathf.Min(p2.uv.y, p3.uv.y));
+        minY = Mathf.Floor(minY);
+
+        for (float x = minX; x <= maxX; x++)
+        {
+            for (float y = minY; y <= maxY; y++)
+            {
+                Vector2 f = new Vector2(x, y);
+                if (PointInTriangle(f, p1.uv, p2.uv, p3.uv))
+                {
+                    // calculate vectors from point f to vertices p1, p2 and p3:
+                    var f1 = p1.uv - f;
+                    var f2 = p2.uv - f;
+                    var f3 = p3.uv - f;
+
+                    // calculate the areas and factors (order of parameters doesn't matter):
+                    var a = Vector3.Cross(p1.uv - p2.uv, p1.uv - p3.uv).magnitude; // main triangle area a
+                    var a1 = Vector3.Cross(f2, f3).magnitude / a; // p1's triangle area / a
+                    var a2 = Vector3.Cross(f3, f1).magnitude / a; // p2's triangle area / a 
+                    var a3 = Vector3.Cross(f1, f2).magnitude / a; // p3's triangle area / a
+
+                    var pos = p1.p * a1 + p2.p * a2 + p3.p * a3;
+                    var nor = p1.n * a1 + p2.n * a2 + p3.n * a3;
+
+                    int occlusion = 0;
+                    // Main loop, take samples up to the limit
+                    for (int j = 0; j < rayCount; j++)
+                    {
+
+                        Vector3 ray = Random.onUnitSphere;
+                        if (Vector3.Dot(ray, nor) < 0) ray = -ray;
+
+                        if (!Physics.Linecast(pos, pos + ray * range))
+                        {
+                            occlusion++;
+                        }
+                    }
+                    float c = (float)occlusion / rayCount;
+                    Color color = new Color(c, c, c, 1);
+
+                    aoTex[aoIndex].SetPixel((int)x, (int)y, color);
+                }
+            }
+        }
+    }
+
     void StartBake()
     {
-        int resolution = 1024;
         // find all mf
         Scene scene = SceneManager.GetActiveScene();
         GameObject[] rootGOes = scene.GetRootGameObjects();
@@ -189,34 +278,28 @@ public class AOBakeWindow : EditorWindow
         }
 
         // create ao tex
-        CreateAOTex(resolution);
+        CreateAOTex();
 
         for (int i = 0; i < meshFilters.Count; i++)
         {
             Mesh mesh = meshFilters[i].sharedMesh;
+            Transform transform = meshFilters[i].transform;
 
             // Store vertices
             Vector3[] verts = mesh.vertices;
+            for (int j = 0; j < verts.Length; j++)
+            {
+                verts[j] = transform.TransformPoint(verts[j]);
+            }
 
             // Store normals
             Vector3[] normals = new Vector3[mesh.normals.Length];
             if (normals.Length == 0)
                 mesh.RecalculateNormals();
-            if (averageNormals)
+            normals = mesh.normals;
+            for (int j = 0; j < normals.Length; j++)
             {
-                Mesh clonemesh = new Mesh();
-                clonemesh.vertices = mesh.vertices;
-                clonemesh.normals = mesh.normals;
-                clonemesh.tangents = mesh.tangents;
-                clonemesh.triangles = mesh.triangles;
-                clonemesh.RecalculateBounds();
-                clonemesh.RecalculateNormals();
-                normals = clonemesh.normals;
-                Object.DestroyImmediate(clonemesh);
-            }
-            else
-            {
-                normals = mesh.normals;
+                normals[j] = transform.TransformDirection(normals[j]);
             }
 
             // store triangles
@@ -224,8 +307,10 @@ public class AOBakeWindow : EditorWindow
 
             // store uv
             MeshRenderer meshRenderer = meshFilters[i].GetComponent<MeshRenderer>();
+            aoIndex = meshRenderer.lightmapIndex;
             Vector4 scaleOffset = meshRenderer.lightmapScaleOffset;
             Vector2[] uvs = mesh.uv2;
+            if (uvs == null || uvs.Length == 0) uvs = mesh.uv;
             for (int j = 0; j < uvs.Length; j++)
             {
                 uvs[j].x = uvs[j].x * scaleOffset.x + scaleOffset.z;
@@ -233,7 +318,8 @@ public class AOBakeWindow : EditorWindow
                 uvs[j] *= resolution;
             }
 
-            for (int j = 0; j < triangles.Length / 3; j++)
+            int triangleCount = triangles.Length / 3;
+            for (int j = 0; j < triangleCount; j++)
             {
                 int id0 = triangles[j * 3];
                 int id1 = triangles[j * 3 + 1];
@@ -248,18 +334,22 @@ public class AOBakeWindow : EditorWindow
                 // sort by uv.y
                 for (int m = 0; m < 3; m++)
                 {
-                    for (int n = m + 1; n < 3; n++)
+                    for (int n = 2; n > m; n--)
                     {
-                        if (p[m].uv.y < p[n].uv.y) { Point t = p[m]; p[m] = p[n]; p[n] = t; }
+                        if (p[n - 1].uv.y < p[n].uv.y) { Point t = p[n - 1]; p[n - 1] = p[n]; p[n] = t; }
                     }
                 }
 
-                drawTriangle(p[0], p[1], p[2]);
+                drawTriangleSimple(p[0], p[1], p[2]);
+                EditorUtility.DisplayProgressBar("Bake prograss", "进度:" + (j * 100 / triangleCount).ToString("f0"), (float)j / triangleCount);
             }
-           
-           
-            EditorUtility.DisplayProgressBar("Bake prograss", "进度:" + ((float)i / meshFilters.Count).ToString("f2"), (float)i / meshFilters.Count);
+
+
+            EditorUtility.DisplayProgressBar("Bake prograss", "进度:" + (i * 100 / meshFilters.Count).ToString("f0"), (float)i / meshFilters.Count);
         }
+
+        SaveAOTex();
+
         EditorUtility.ClearProgressBar();
     }
 }
