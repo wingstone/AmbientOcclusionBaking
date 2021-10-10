@@ -34,15 +34,15 @@ public struct Triangle
 public class AOBakeWindow : EditorWindow
 {
     int resolution = 1024;
-    int rayCount = 512;
+    int rayCount = 128;
     float range = 1.5f;
-    bool useBlur = false;
+    bool useBlur = true;
+    bool enablePBR = false;
 
     Texture2D[] aoTex = null;
     int aoIndex = -1;
+    List<MeshCollider> meshColliders = null;
 
-
-    // Add menu named "My Window" to the Window menu
     [MenuItem("Window/AOBakeWindow")]
     static void Init()
     {
@@ -50,21 +50,129 @@ public class AOBakeWindow : EditorWindow
         AOBakeWindow window = (AOBakeWindow)EditorWindow.GetWindow(typeof(AOBakeWindow));
         window.Show();
     }
+    private bool Get2Flag(int num)
+    {
+        if (num < 1) return false;
+        return (num & num - 1) == 0;
+    }
 
     void OnGUI()
     {
+        EditorGUILayout.BeginVertical();
         GUILayout.Label("Base Settings", EditorStyles.boldLabel);
 
         resolution = EditorGUILayout.IntSlider("AO Resolution", resolution, 128, 1024);
+        while (!Get2Flag(resolution))
+        {
+            resolution--;
+        }
         rayCount = EditorGUILayout.IntSlider("Ray Count", rayCount, 0, 1024);
         range = EditorGUILayout.Slider("Range", range, 0, 3);
         useBlur = EditorGUILayout.Toggle("Use Blur", useBlur);
+        enablePBR = EditorGUILayout.Toggle("Enable PBR", enablePBR);
 
         if (GUILayout.Button("Bake Start"))
         {
+            LightmapData[] lightmapDatas = LightmapSettings.lightmaps;
+            if (lightmapDatas == null || lightmapDatas.Length == 0)
+            {
+                EditorUtility.DisplayDialog("Error", "Must bake lightmap first!", "OK");
+                return;
+            }
+            AddMeshCollider();
             StartBake();
+            RemoveMeshCollider();
+            SetAOTextureImporter();
+        }
+        if (GUILayout.Button("Preview AO"))
+        {
+            PreviewAO();
+        }
+        EditorGUILayout.EndVertical();
+    }
+
+    void SetAOTextureImporter()
+    {
+        string path = SceneManager.GetActiveScene().path;
+        path = Path.GetDirectoryName(path);
+        string name = SceneManager.GetActiveScene().name;
+        path = Path.Combine(path, name);
+
+        LightmapData[] lightmapDatas = LightmapSettings.lightmaps;
+        for (int i = 0; i < lightmapDatas.Length; i++)
+        {
+            string aoPath = path + "/AmbientOcclusion_" + i + ".tga";
+            TextureImporter importer = AssetImporter.GetAtPath(aoPath) as TextureImporter;
+            if (importer != null)
+            {
+                importer.wrapMode = TextureWrapMode.Clamp;
+                importer.SaveAndReimport();
+            }
+        }
+    }
+
+    void PreviewAO()
+    {
+        string path = SceneManager.GetActiveScene().path;
+        path = Path.GetDirectoryName(path);
+        string name = SceneManager.GetActiveScene().name;
+        path = Path.Combine(path, name);
+
+        LightmapData[] lightmapDatas = LightmapSettings.lightmaps;
+        for (int i = 0; i < lightmapDatas.Length; i++)
+        {
+            string aoPath = path + "/AmbientOcclusion_" + i + ".tga";
+            Texture2D ao = AssetDatabase.LoadAssetAtPath<Texture2D>(aoPath);
+            if (ao == null)
+            {
+                EditorUtility.DisplayDialog("Error", "There is no AO tex!", "OK");
+                return;
+            }
+            lightmapDatas[i].lightmapColor = ao;
         }
 
+        LightmapSettings.lightmaps = lightmapDatas;
+    }
+
+    void AddMeshCollider()
+    {
+        // find all mf
+        Scene scene = SceneManager.GetActiveScene();
+        GameObject[] rootGOes = scene.GetRootGameObjects();
+
+        List<MeshFilter> meshFilters = new List<MeshFilter>();
+
+        foreach (var item in rootGOes)
+        {
+            MeshFilter[] findMFs = item.GetComponentsInChildren<MeshFilter>();
+            foreach (var mf in findMFs)
+            {
+                var haveLightMap = (GameObjectUtility.GetStaticEditorFlags(mf.gameObject) & StaticEditorFlags.ContributeGI) != 0;
+                if (haveLightMap)
+                    meshFilters.Add(mf);
+            }
+        }
+
+        meshColliders = new List<MeshCollider>();
+
+        foreach (var item in meshFilters)
+        {
+            Collider collider = item.GetComponent<Collider>();
+            if (collider == null)
+            {
+                MeshCollider meshCollider = item.gameObject.AddComponent<MeshCollider>();
+                meshCollider.sharedMesh = item.sharedMesh;
+                meshColliders.Add(meshCollider);
+            }
+        }
+    }
+
+    void RemoveMeshCollider()
+    {
+        foreach (var item in meshColliders)
+        {
+            GameObject.DestroyImmediate(item);
+        }
     }
 
     void CreateAOTex()
@@ -101,7 +209,7 @@ public class AOBakeWindow : EditorWindow
 
     void drawLine(int x1, int x2, int y, Point p1, Point p2, Point p3)
     {
-        for (int x = x1; x1 <= x2; x1++)
+        for (int x = x1; x <= x2; x++)
         {
             Vector2 f = new Vector2(x, y);
             // calculate vectors from point f to vertices p1, p2 and p3:
@@ -146,7 +254,7 @@ public class AOBakeWindow : EditorWindow
 
     void fillTopFlatTriangle(Point v1, Point v2, Point v3)
     {
-        if (v1.uv.x > v2.uv.x) { Point t = v3; v3 = v2; v2 = t; }
+        if (v1.uv.x > v2.uv.x) { Point t = v1; v1 = v2; v2 = t; }
 
         float invslope1 = (v3.uv.x - v1.uv.x) / (v3.uv.y - v1.uv.y);
         float invslope2 = (v3.uv.x - v2.uv.x) / (v3.uv.y - v2.uv.y);
@@ -219,7 +327,7 @@ public class AOBakeWindow : EditorWindow
         {
             for (float y = minY; y <= maxY; y++)
             {
-                Vector2 f = new Vector2(x, y);
+                Vector2 f = new Vector2(x + 0.5f, y + 0.5f);
                 if (PointInTriangle(f, p1.uv, p2.uv, p3.uv))
                 {
                     // calculate vectors from point f to vertices p1, p2 and p3:
@@ -236,7 +344,7 @@ public class AOBakeWindow : EditorWindow
                     var pos = p1.p * a1 + p2.p * a2 + p3.p * a3;
                     var nor = p1.n * a1 + p2.n * a2 + p3.n * a3;
 
-                    int occlusion = 0;
+                    float occlusion = 0;
                     // Main loop, take samples up to the limit
                     for (int j = 0; j < rayCount; j++)
                     {
@@ -246,15 +354,95 @@ public class AOBakeWindow : EditorWindow
 
                         if (!Physics.Linecast(pos, pos + ray * range))
                         {
-                            occlusion++;
+                            if (enablePBR)
+                                occlusion += Vector3.Dot(nor, ray) * 2;
+                            else
+                                occlusion++;
                         }
                     }
                     float c = (float)occlusion / rayCount;
-                    Color color = new Color(c, c, c, 1);
+                    Color color = new Color(c, 0, 0, 1);
 
                     aoTex[aoIndex].SetPixel((int)x, (int)y, color);
                 }
             }
+        }
+    }
+
+    void FixSeam()
+    {
+        for (int i = 0; i < aoTex.Length; i++)
+        {
+            Color[] srcColors = aoTex[i].GetPixels();
+            Color[] dstColors = aoTex[i].GetPixels();
+
+            for (int m = 0; m < resolution; m++)
+            {
+                for (int n = 0; n < resolution; n++)
+                {
+                    Color c = srcColors[m * resolution + n];
+                    if (c.g > 0.5)
+                    {
+                        for (int j = -1; j <= 1; j++)
+                        {
+                            for (int k = -1; k <= 1; k++)
+                            {
+                                int x = Mathf.Clamp(m + j, 0, resolution - 1);
+                                int y = Mathf.Clamp(n + k, 0, resolution - 1);
+
+                                c.r = Mathf.Min(c.r, srcColors[x * resolution + y].r);
+                            }
+                        }
+                    }
+                    if (useBlur)
+                        dstColors[m * resolution + n].r = c.r;
+                    else
+                    {
+                        dstColors[m * resolution + n].r = c.r;
+                        dstColors[m * resolution + n].g = c.r;
+                        dstColors[m * resolution + n].b = c.r;
+                    }
+                }
+            }
+
+            aoTex[i].SetPixels(dstColors);
+        }
+    }
+
+    void BlurAO()
+    {
+        for (int i = 0; i < aoTex.Length; i++)
+        {
+            Color[] srcColors = aoTex[i].GetPixels();
+            Color[] dstColors = aoTex[i].GetPixels();
+
+            for (int m = 0; m < resolution; m++)
+            {
+                for (int n = 0; n < resolution; n++)
+                {
+                    Color c = srcColors[m * resolution + n];
+                    if (c.g < 0.5)
+                    {
+                        c = Color.black;
+                        for (int j = -1; j <= 1; j++)
+                        {
+                            for (int k = -1; k <= 1; k++)
+                            {
+                                int x = Mathf.Clamp(m + j, 0, resolution - 1);
+                                int y = Mathf.Clamp(n + k, 0, resolution - 1);
+
+                                c.r += srcColors[x * resolution + y].r;
+                            }
+                        }
+                        c = c / 9;
+                    }
+                    dstColors[m * resolution + n].r = c.r;
+                    dstColors[m * resolution + n].g = c.r;
+                    dstColors[m * resolution + n].b = c.r;
+                }
+            }
+
+            aoTex[i].SetPixels(dstColors);
         }
     }
 
@@ -336,20 +524,26 @@ public class AOBakeWindow : EditorWindow
                 {
                     for (int n = 2; n > m; n--)
                     {
-                        if (p[n - 1].uv.y < p[n].uv.y) { Point t = p[n - 1]; p[n - 1] = p[n]; p[n] = t; }
+                        if (p[n - 1].uv.y > p[n].uv.y) { Point t = p[n - 1]; p[n - 1] = p[n]; p[n] = t; }
                     }
                 }
 
                 drawTriangleSimple(p[0], p[1], p[2]);
-                EditorUtility.DisplayProgressBar("Bake prograss", "进度:" + (j * 100 / triangleCount).ToString("f0"), (float)j / triangleCount);
+                EditorUtility.DisplayProgressBar("Bake prograss", "Prograss:" + (j * 100 / triangleCount).ToString("f0"), (float)j / triangleCount);
             }
 
 
-            EditorUtility.DisplayProgressBar("Bake prograss", "进度:" + (i * 100 / meshFilters.Count).ToString("f0"), (float)i / meshFilters.Count);
+            EditorUtility.DisplayProgressBar("Bake prograss", "Prograss:" + (i * 100 / meshFilters.Count).ToString("f0"), (float)i / meshFilters.Count);
         }
+
+        FixSeam();
+
+        if (useBlur)
+            BlurAO();
 
         SaveAOTex();
 
         EditorUtility.ClearProgressBar();
     }
+
 }
